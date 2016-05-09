@@ -1,0 +1,395 @@
+---
+title: "Detroit Blight Analysis"
+author: "DManh"
+date: "May 8, 2016"
+output: 
+    pdf_document:
+        toc: true
+        toc_depth: 2
+        number_sections: true
+    html_document:
+        toc: true
+        toc_depth: 2
+---
+
+*Abstract*:
+*This primilinary paper studies the phenomenom of abandonned buildings in Detroit based on data from blight violations, crimes, Detroit 311 calls and data on demolition permits. I construct spatial features such as the number of blight violation incidents, number of crimes, number of 311 calls , total fees charged by blight violations within about 1km radius of the building. I find that the number of blight violation incidents that happen within 10m radius of the building is the most critical predictor. Also, the number of blight violations, number of crimes within 1km neighborhood are significant, increasing the probability of "being blighted". Interestingly, the crimes related to properties increase the probablity of being blighted, whereas other crimes decrease the probability of being blighted. The 311 calls and total fees charged are not significant in predicting the blight. I used various models to evaluate the data set: logistic regression, linear and quadratic discriminant analysis and tree model. I find the test error is about 33%. More refined models could be built by taking into account the temporal element of data sets. This is subject to a more advanced analysis*
+
+# Introduction
+Since 2005, a third of Detroit's properties have been forclosed (140k over 384k properties). Mortgages defaults and unpaid taxes are the two principal reasons. If the subprime crisis 2007-2008 is the direct cause of this ongoing Detroit foreclosure crisis, Detroit's main activity shifting elsewhere is the longterm cause. This priliminary study tries to explore the data sets from Detroit open data portail to predict the probability of a building being "blighted": the blight violations data, the 311 calls, crimes data and data on demolition permits. 
+
+The data are rich in tempospatial data with each incidents being recorded in gps location and time precisely. Due to the scope of this study, we restrict ourselves only to spatial data and not explore yet the time elements in data sets. We do, however, find very interesting insights and promising for a more advanced analysis. Much of the time is spent on extracting useful information from data sets, in dealing with spatial data (which is not an evident challenge). Models used in the analysis: logistic regression, linear discriminant analysis, quadratic discriminant analysis and tree model. We evaluated the 3 formers by 5-fold cross validation and the latter by the missclassification rate. They all yield consistent 33-34% validation error, showing these models all function equally well. The test error is estimated to be about 34% as well. 
+
+Finally, the analysis is conducted in R with the source code can be found at [**https://github.com/dmanh/Detroit-Blight-Analysis**](https://github.com/dmanh/Detroit-Blight-Analysis). This study adopts the outline proposed by Coursera Data Science at Scale by University of Washington. We will start first by exploring the data sets, then cleaning data sets, constructing first training data set, training a simple model and finally engineering more features. The study concludes by discussing more directions for further analysis.
+
+# Getting to know the data
+
+The goal of this section is to visualize spatial data of blight violations, dcalls, crimes and demolition permits on Detroit's map. As we will show that these incidents happen all over Detroit and there are some indicents happen outside Detroit (due to measure errors), but these incidents are very small. 
+
+The blight violation provided in the Coursera is corrupt, with extracted gps locations and postal location are not the same, so we use the original data on the Detroit open data portail at [https://data.detroitmi.gov/Property-Parcels/Blight-Violations/teu6-anhh](https://data.detroitmi.gov/Property-Parcels/Blight-Violations/teu6-anhh).
+
+## Extracting gps location data
+```{r}
+viols <- read.csv("./data/Blight_Violations.csv")
+names(viols)
+```
+As said previously, we are only interested in spatial data, so:
+```{r}
+viols <- viols[,c("ViolationStreetNumber","ViolationStreetName","ViolDescription",
+                  "FineAmt","AdminFee","StateFee","LateFee","CleanUpCost",
+                  "LienFilingFee","JudgmentAmt","ViolationLocation")]
+str(viols)
+```
+We need to clean up the fee-related variables by transforming them into numeric values and from "ViolationLocation" column, we extract lattitude and langitude values. We will see that there are quite some "ViolationLocation" with no gps coordinates. We also create another variable that is the total fee related. 
+```{r , results="hide"}
+## Parsing GPS coordinates
+## define regular expression pattern
+gpsParsing <- function(addr, p="\\(.*\\)")
+{
+  r <- regexpr(p, addr)
+  out <- rep(NA, length(r))
+  out[r != -1] <- regmatches(addr, r)
+  ## strip the \\( and \\)
+  out <- gsub("[()]", "", out)
+  lats <- unlist(lapply(out, function(x) as.numeric(strsplit(x, split=",")[[1]][1])))
+  lngs <- unlist(lapply(out, function(x) as.numeric(strsplit(x, split=",")[[1]][2])))
+  list(lat=lats, lng=lngs)
+}
+
+latlngs <- gpsParsing(viols$ViolationLocation)
+viols$lat <- latlngs$lat
+viols$lng <- latlngs$lng
+viols$FineAmt <- as.numeric(gsub("\\$","", as.character(viols$FineAmt)), na.rm=FALSE)
+viols$FineAmt[is.na(viols$FineAmt)] <- 0
+viols$AdminFee <- as.numeric(gsub("\\$","", as.character(viols$AdminFee)), na.rm=FALSE)
+viols$AdminFee[is.na(viols$AdminFee)] <- 0
+viols$StateFee <- as.numeric(gsub("\\$","", as.character(viols$StateFee)), na.rm=FALSE)
+viols$StateFee[is.na(viols$StateFee)] <- 0
+viols$LateFee <- as.numeric(gsub("\\$","", as.character(viols$LateFee)), na.rm=FALSE)
+viols$LateFee[is.na(viols$LateFee)] <- 0
+viols$CleanUpCost <- as.numeric(gsub("\\$","", as.character(viols$CleanUpCost)), na.rm=FALSE)
+viols$CleanUpCost[is.na(viols$CleanUpCost)] <- 0
+viols$LienFilingFee <- as.numeric(gsub("\\$","", as.character(viols$LienFilingFee)), na.rm=FALSE)
+viols$LienFilingFee[is.na(viols$LienFilingFee)] <- 0
+viols$JudgmentAmt <- as.numeric(gsub("\\$","", as.character(viols$JudgmentAmt)), na.rm=FALSE)
+viols$JudgmentAmt[is.na(viols$JudgmentAmt)] <- 0
+viols$totalfee <- viols$FineAmt + viols$AdminFee + viols$StateFee + viols$LateFee + viols$CleanUpCost+ viols$LienFilingFee + viols$JudgmentAmt
+```
+
+We use geosphere's distHarversine distance to calculate distance between two gps coordinates and we see that two points with longitudes and lattides as close as 10-4 are about 10 m far away, 10-3 for 120 m and 10-2 for 1300 m. So we created latR and lngR are lattides and longitdes at 4-digit level of accuracy.
+```{r}
+library(geosphere)
+distHaversine(c(0.0,0.0),c(0.0001,0.0001))
+distHaversine(c(0.0,0.0),c(0.001,0.001))
+distHaversine(c(0.0,0.0),c(0.01,0.01))
+viols$latR <- round(viols$lat, digits=4)
+viols$lngR <- round(viols$lng, digits=4)
+```
+
+For the 311 calls, crimes and permits, we do the same:
+```{r}
+######################### 2. Detroit 311 calls #########################
+dcalls <- read.csv("./data/detroit-311.csv")
+dcalls <- dcalls[,c("issue_type","lat","lng")]
+dcalls$latR <- round(dcalls$lat, digits=4)
+dcalls$lngR <- round(dcalls$lng, digits=4)
+######################### 3. Detroit Crimes Data #######################
+crimes <- read.csv("./data/detroit-crime.csv")
+crimes <- crimes[,c("CATEGORY","LON","LAT")]
+names(crimes) <- c("category","lng","lat")
+crimes$latR <- round(crimes$lat, digits=4)
+crimes$lngR <- round(crimes$lng, digits=4)
+######################## 4. Detroit Demolition permits ########################
+permits <- read.csv("./data/detroit-demolition-permits.tsv", sep ="\t")
+permits <- permits[,c("BLD_PERMIT_TYPE","site_location")]
+p.latlngs <- gpsParsing(permits$site_location)
+permits$lat <- p.latlngs$lat
+permits$lng <- p.latlngs$lng
+permits$latR <- round(permits$lat, digits=4)
+permits$lngR <- round(permits$lng, digits=4)
+```
+
+## Visualization incident data
+We use ggmap package to get from google Detroit map and add points from blight violations, 311 calls, crimes and permits data. We can see the distribution of these points:
+```{r}
+## getting Detroit map from google
+library(ggmap)
+detroitmap <- get_googlemap(center = c(lon=-83.119128,lat=42.384713),maptype = "roadmap", size=c(640,640),zoom = 11)
+ggmap(detroitmap)
+
+## Blight violation data: we sample about 4000 points
+ggmap(detroitmap) + geom_point(aes(x=lng,y=lat),
+                               data=viols[sample(1:nrow(viols), 4000),],
+                                             color = I("red"))
+
+## crimes data: we sample 4000 point
+ggmap(detroitmap) + geom_point(aes(x=lng,y=lat),
+                               data=crimes[sample(1:nrow(crimes), 4000),],
+                                             color = I("red"))
+## 311 calls data
+ggmap(detroitmap) + geom_point(aes(x=lng,y=lat),
+                               data=dcalls[sample(1:nrow(dcalls), 4000),],
+                                             color = I("red"))
+
+## blighted data on demolition permits
+ggmap(detroitmap) + geom_point(aes(x=lng,y=lat),
+                               data=permits[sample(1:nrow(permits), 4000),],
+                                             color = I("red"))
+```
+We can see that blighted buildings concentrate in the west, south west, north east and east of Detroit. 
+
+# Construting a balanced data set with label: blighted 
+
+Once, we have a some ideas about the data, we are going to construct a balanced data set with label. From demolition data set, we have about 4500 data points of Dismantle/DMLT in type, which we can consider as "blighted" buildings. We need to construct about 4500 random other points not blighted inside Detroit. This part is a little bit tricky since it involes the notion of polygon. We can download Detroit polygon data set from [**Detroit Multipolygon Data**](https://data.detroitmi.gov/Government/City-Boundaries/sjb9-gjxf). In short, they are coordinates of boundary points in Detroit. We can download .json file and parse this file to get all the boundaries coordinates. We used Python to parse this file to obtain the file [**detroit_multipolygon.csv**](https://github.com/dmanh/Detroit-Blight-Analysis/blob/data/detroit_multipolygon.csv). 
+
+R's sp package provides the function spsample which is very neat to sample points inside a polygon as we do below:
+
+```{r}
+######################### Generating random detroit point ################
+library(sp)
+det_polygon <- read.csv("./data/clean/detroit_multipolygon.csv")
+det_sample <- spsample(Polygon(det_polygon), n=2*nrow(permits), type = "random")
+det_sample <- as.data.frame(det_sample)
+# head(det_sample)
+names(det_sample) <- c("lng","lat")
+det_sample$lngR <- round(det_sample$lng, digits=4)
+det_sample$latR <- round(det_sample$lat, digits=4)
+## we can visualize the data to see they are really inside Detroit city
+ggmap(detroitmap) + geom_point(aes(x=lng,y=lat),data=det_sample, 
+                               color = I("red"))
+## Now we extract dismantled locations  or "blighted" label
+blighted <- permits[,c("latR","lngR")]
+blighted <- unique(blighted)
+blighted$blighted <- TRUE
+
+## In order to work with spatial data, we need to create an id columns 
+## for all points in both det_sample and blighted
+allbuildings <- rbind(blighted[,c("latR","lngR")], det_sample[,c("latR","lngR")])
+allbuildings <- unique(allbuildings)
+allbuildings$id <- 1:nrow(allbuildings)
+
+## We need an auxiliary function that returns an id for an gps location
+################### FINDING THE BUILDING ID ##############################
+findIds <- function(x = c(0.0, 0.0), batsID, bycolumn="id", digits=4) 
+{
+  # This function take a point (lat, lng) and the aggregate building index batsID
+  # as arguments and return the id in the batsID
+  # Condition: the point x = (lat, lng) comes from the population of (lat, lng)
+  # which is huge, so this is not valid for outsider points (lat, lng)
+  # Well for outsiders or NAs, it just returns NA
+  x <- round(x, digits=digits)
+  return (batsID[which(batsID[,"latR"] == x[1] & 
+                         batsID[,"lngR"] == x[2]),"id"])
+}
+
+## Then now we create id column for blighted and det_sample
+## apply the function findIds by rows
+blighted$id <- as.numeric(apply(matrix(c(blighted$latR, blighted$lngR), ncol=2), 1, findIds, allbuildings), na.rm = FALSE)
+det_sample$id <- as.numeric(apply(matrix(c(det_sample$latR, det_sample$lngR), ncol=2), 1, findIds, allbuildings), na.rm = FALSE)
+
+## Now, we construct the sample by labelling data in det_sample
+det_sample$blighted <- FALSE
+det_sample[which(det_sample$id %in% blighted$id),"blighted"] <- TRUE
+
+## We use sample_n function from package dplyr
+library(dplyr)
+df_false <- sample_n(det_sample[which(!det_sample$blighted),], nrow(blighted))
+df_false <- df_false[,c("latR","lngR","id","blighted")]
+
+## We combine the blighted and random non-blighted buildings
+data <- rbind(df_false,blighted)
+data[sample(1:nrow(data),5),]
+```
+
+Now, the "dat" data set we have is ready. It is balanced and the non-blighted buildings are chosen randomly from Detroit using polygon.
+
+
+# Feature Engineering
+
+## The first and second features: the number of violation 
+We create the first feature, which will be proved to be the most significant feature, as the number of blight violation within 15m of every building. The second feature is the number of violations that happen within 1500 m of every building. This second feature captures the spatiality of the data. This intuition is clear, which is if I am sourrounded by more likely blighted buildings, I am more likely blighted. This is due to the fact that buildings within few blocs share some construction characteristics such as age, the bloc environment state and some similar economic activity (price being close for example). The threshold of 1500 m (or .0001 radius of lattitude and longitude coordinates) is quite reasonbale. It is average to capture the neighborhood factor. We construct two variables "bviols" and "neighbor_nbviols"
+
+## Features from crime data
+We divide types of crime into 02 classes: building related ("ARSON", "DAMAGE TO PROPERTY", "ENVIRONMENT","RUNAWAY" ) and other crimes ("AGGRAVATED ASSAULT", "DRUNKENNESS", "EMBEZZLEMENT", "HOMICIDE","JUSTIFIABLE HOMICIDE","LARCENY","NEGLIGENT HOMICIDE","OTHER BURGLARY","OUIL DISPOSE OF VEHICLE TO AVOID FORFEITURE","STOLEN VEHICLE","VAGRANCY (OTHER)", "ASSAULT","BURGLARY","DANGEROUS DRUGS", "HEALTH-SAFETY", "IMMIGRATION", "KIDNAPING","LIQUOR", "WEAPONS OFFENSES", "STOLEN PROPERTY", "ROBBERY") being indirectly related to the building's location, while excluding other types such as CONGRESS, ELECTION etc. 
+We will see that the first class increases the likelihood of a building being blighted while the second class decreases. The former is quite trivial but the latter can be explained as such since these crimes are "intentional" types which are associated with some "motivation", the neighborhood must be in some "good state" to take advantage of. This is why, these crime decrese the likelihood of a building being "blighted". We construct two variables "bd.crimes" and "other.crimes" for this.
+ 
+## Features from 311 calls
+We exclude the following types Traffic Sign Issue", "Traffic Signal Issue","Street Light Pole Down","Test (internal use only, public issue) which are in no connection to the degradation of the location. We construct variable nb_311 for this purpose.
+
+## Features from total fee 
+To see the gravity of blight violations, we can use the total fee related to violations as a proxy. We constructed voisin_fee for this.
+
+Note that, nb_311, voisin_fee, bd.crimes, other.crimes, neighbor_nbviols are calculated in taking the total of incidents within .0001 in lattides and longituges coordinates. 
+
+# Model Selection
+We first split the data set into training and testing data sets. We then choose tree model, and logistic regression, linear discriminant analysis and quadratic discriminant analysis with 5-fold cross validation techniques to estimate training errors. 
+We all approximately obtain the estimated training error about 27% and the testing error 28% (except for quadratic discriminant analysis). 
+
+# Further discussion
+
+Since we have time data for each incidents, we can calculate these features by breaking into years and take into account the lag effect between year on year. This would be a temporal spatial analysis. Since blighted buildings are quite concentrated on the North East, East, West, South West sides, we should be interested in getting data from nearby cities, so that we can calculate the incidents that happen close to location in Detroit. As we talked at the begining of the study that the default and taxes are main reasons for Detroit forclusure crisis. It would be useful to be able to integrate economic data, disaggregated into blocs, for example real estate prices. 
+Another direction for further analysis would be to vary the distance 1.5km that we supposed by default. Can we find the optimal distance or the effect of this distance on the accuracy of our model. Since we have spatial data, we can do this by doing simulation.
+
+Finally, check out my source code for improvements. Stay in touch ! 
+
+
+```{r}
+###################### RETURN total nbviols of neighbors  #############################
+# given x = (lat, lng), return the total nbviols of its neighbors from 
+# nbviols data frame df, which has 3 columns latR, lngR and nbviols or freq
+neighbors_total <- function(x=c(0.0, 0.0), df, epsilon=.01)
+{
+  ## we define neighbor as all locations within about .01 and .01 in 
+  ## longitude and lattitude distance, or about 1.3 km in Harversine distance
+  (sum(df[which(abs(df[,"latR"] - x[1]) < epsilon &
+                  abs(df[,"lngR"] - x[2]) < epsilon), "freq"]))
+}
+
+############################## 1. nbviols in my neighborhood 
+library(plyr)
+## nbviols: within 0.0001 of longitudes and lattitudes coordinates
+df <- plyr::count(viols, vars = c("latR","lngR"))
+data$nbviols <- as.numeric(apply(as.matrix(data[,c("latR","lngR")]), 1, 
+                              neighbors_total, df=df, epsilon = 0.0001), 
+                           na.rm=FALSE)
+## neighbor_nbviols: total blight violation within 0.01 of longitudes and 
+## lattitudes coordinates
+df <- plyr::count(viols, vars = c("latR","lngR"))
+data$neighbor_nbviols <- as.numeric(apply(as.matrix(data[,c("latR","lngR")]), 1, 
+                                          neighbors_total, df=df), na.rm=FALSE)
+
+########################## 2. CRIME DATA #################################################
+buildings.crimes <- c("ARSON", "DAMAGE TO PROPERTY", "ENVIRONMENT","RUNAWAY")
+related.crimes <- c("AGGRAVATED ASSAULT", "DRUNKENNESS", "EMBEZZLEMENT", 
+                    "HOMICIDE","JUSTIFIABLE HOMICIDE","LARCENY","NEGLIGENT HOMICIDE",
+                    "OTHER BURGLARY","OUIL DISPOSE OF VEHICLE TO AVOID FORFEITURE",
+                    "STOLEN VEHICLE","VAGRANCY (OTHER)", "ASSAULT","BURGLARY",
+                    "DANGEROUS DRUGS", "HEALTH-SAFETY", "IMMIGRATION", "KIDNAPING",
+                    "LIQUOR", "WEAPONS OFFENSES", "STOLEN PROPERTY", "ROBBERY"
+                    )
+
+## bd.crimes feature: building related crimes
+df <- plyr::count(crimes[which(crimes$category %in% buildings.crimes),], 
+                          vars = c("latR","lngR"))
+data$bd.crimes <- as.numeric(apply(as.matrix(data[,c("latR","lngR")]), 1, 
+                                   neighbors_total, df), na.rm=FALSE)
+
+## other.crime features: other crimes that are indirectly related to 
+df <- plyr::count(crimes[which(crimes$category %in% related.crimes),], 
+                  vars = c("latR","lngR"))
+data$other.crimes <- as.numeric(apply(as.matrix(data[,c("latR","lngR")]), 1, 
+                                      neighbors_total, df), na.rm=FALSE)
+
+######################### 3. 311 calls data #################################################
+exluded.types <- c("Traffic Sign Issue", "Traffic Signal Issue","Street Light Pole Down","Test (internal use only, public issue)")
+df <- plyr::count(dcalls[-which(dcalls$issue_type %in% exluded.types),], vars = c("latR","lngR"))
+data$nb_311 <-  as.numeric(apply(as.matrix(data[,c("latR","lngR")]), 1, 
+                                 neighbors_total, df=df), na.rm=FALSE)
+
+#########################  4. Violation total fee of neighbors #####################################
+df <- viols[,c("latR","lngR","totalfee")]
+names(df) <- c("latR","lngR","freq")
+data$voisin_fee <- as.numeric(apply(as.matrix(data[,c("latR","lngR")]), 1, 
+                                    neighbors_total, df=df), na.rm=FALSE)
+summary(data)
+
+######### Training and test set
+Train <- sample(nrow(data), size = nrow(data)*.8)
+training <- data[Train,]
+testing <- data[-Train,]
+# we use contrasts(dfs$blight) to know how R codes TRUE and FALSE
+######## Estimating the accuracy by using cross-validation
+#Randomly shuffle the data
+training <- training[sample(nrow(training)),]
+#Create 5 equally size folds
+folds <- cut(seq(1,nrow(training)),breaks=5,labels=FALSE)
+
+########################## 2. Estimating CV error #######################################
+
+################ 2a. CV error with glm
+#Perform 5 fold cross validation
+error <- 1:5
+for(i in 1:5){
+  #Segement your data by fold using the which() function 
+  validIndexes <- which(folds==i,arr.ind=TRUE)
+  validData <- training[validIndexes, ]
+  trainData <- training[-validIndexes, ]
+  #Use test and train data partitions however you desire
+  mod_fit <- glm(blighted ~ log(1+nbviols) + log(1+neighbor_nbviols)
+                 + log(1 + bd.crimes) + log(1+ other.crimes) + log(1+ nb_311) + 
+                   log(1 + voisin_fee), 
+                 data=trainData, family = binomial)
+  mod_probs <- predict(mod_fit, newdata = validData, type="response")
+  mod_preds <- rep(FALSE, length(mod_probs))
+  mod_preds[mod_probs > 0.5] <- TRUE
+  error[i] <- mean(mod_preds != validData$blight)
+}
+## Estimated training error for logistic regression
+mean(error) ## 27.84%
+summary(mod_fit)
+
+############### 2b. CV error with linear discriminant analysis 
+library(MASS)  # for lda function 
+
+error <- 1:5
+for(i in 1:5){
+  #Segement your data by fold using the which() function 
+  validIndexes <- which(folds==i,arr.ind=TRUE)
+  validData <- training[validIndexes, ]
+  trainData <- training[-validIndexes, ]
+  #Use test and train data partitions however you desire
+  mod_fit <- lda(blighted ~ log(1+nbviols) + log(1+neighbor_nbviols)
+                 + log(1 + bd.crimes) + log(1+ other.crimes) + log(1+ nb_311) + 
+                   log(1 + voisin_fee),
+                 data=trainData)
+  mod_probs <- predict(mod_fit, validData)
+  mod_preds <- mod_probs$class
+  error[i] <- mean(mod_preds != validData$blight)
+}
+### Estimated training error for lda
+mean(error)  # 27.52%
+
+############### 2c. CV error with quadratic discriminant analysis 
+library(MASS)  # for qda function 
+
+error <- 1:5
+for(i in 1:5){
+  #Segement your data by fold using the which() function 
+  validIndexes <- which(folds==i,arr.ind=TRUE)
+  validData <- training[validIndexes, ]
+  trainData <- training[-validIndexes, ]
+  #Use test and train data partitions however you desire
+  mod_fit <- qda(blighted ~ log(1+nbviols) + log(1+neighbor_nbviols)
+                 + log(1 + bd.crimes) + log(1+ other.crimes) + log(1+ nb_311) + 
+                   log(1 + voisin_fee), 
+                 data=trainData)
+  mod_probs <- predict(mod_fit, validData)
+  mod_preds <- mod_probs$class
+  error[i] <- mean(mod_preds != validData$blight)
+}
+mean(error)  ## 36.36% error
+
+############### 2d. CV error with tree 
+library(tree)
+data$blighted <- factor(data$blighted)
+training$blighted <- factor(training$blighted)
+testing$blighted <- factor(testing$blighted)
+blighted.tree <- tree(blighted ~ nbviols + neighbor_nbviols
+                      + bd.crimes + other.crimes + nb_311
+                      + voisin_fee, data = training)
+blighted.tree.pred <- predict(blighted.tree, testing, type="class")
+mean(blighted.tree.pred != testing$blighted)  # error: 27.81%
+summary(blighted.tree)  ## missclassification error rate: 27.36%
+```
+
+
+
+# Links
+
+1. [**Source code**](https://github.com/dmanh/Detroit-Blight-Analysis)
+2. [**Detroit Blight Violations Data**](https://data.detroitmi.gov/Property-Parcels/Blight-Violations/teu6-anhh)
+3. [**Detroit Multipolygon Data**](https://data.detroitmi.gov/Government/City-Boundaries/sjb9-gjxf)
+4. [**Detroit Polygon Points - clean points**](https://github.com/dmanh/Detroit-Blight-Analysis/blob/data/detroit_multipolygon.csv)
+
+
+
